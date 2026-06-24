@@ -1,97 +1,282 @@
-# DataMart S.A.S. — Pipeline ETL con Apache Airflow
+# DataMart S.A.S. — ETL Data Pipeline
 
-Pipeline que extrae datos de ventas (Kaggle), los limpia/transforma aplicando
-reglas de negocio, y los carga en un Data Warehouse en PostgreSQL, todo
-orquestado por Apache Airflow corriendo en Docker.
+This repository contains an end-to-end ETL pipeline developed for **DataMart S.A.S.** to consolidate operational e-commerce data into a structured PostgreSQL analytical repository.
 
-## 1. Requisitos previos
+The solution is containerized using Docker and orchestrated with Apache Airflow.
 
-- Docker Desktop instalado y corriendo (incluye Docker Compose).
-- Git.
-- (Opcional, para inspeccionar el DW) DBeaver o pgAdmin.
+---
 
-## 2. Descargar los datos (paso manual, una sola vez)
+# Project Overview
 
-Como las fuentes son privadas de Kaggle, descárgalas manualmente y ponlas
-en `data/raw/`:
+The objective of this project is to:
 
-1. https://www.kaggle.com/datasets/carrie1/ecommerce-data → descarga `data.csv`
-2. https://www.kaggle.com/datasets/thedevastator/online-retail-transaction-dataset → descarga `online_retail_II.csv`
+* Extract transactional information from multiple CSV sources.
+* Standardize and clean heterogeneous schemas.
+* Apply business validation rules and quality controls.
+* Build analytical entities for reporting.
+* Persist curated datasets into PostgreSQL.
 
-Resultado esperado:
+The pipeline follows a layered architecture:
+
+```text
+Raw CSV
+   ↓
+Extract
+   ↓
+Parquet Staging
+   ↓
+Transform
+   ↓
+Validated Parquet
+   ↓
+Load
+   ↓
+PostgreSQL Data Warehouse
 ```
-data/raw/data.csv
-data/raw/online_retail_II.csv
+
+---
+
+# Repository Structure
+
+```text
+datamart-pipeline/
+
+├── dags/
+│   └── pipeline_datamart.py
+
+├── scripts/
+│   ├── extract.py
+│   ├── transform.py
+│   └── load.py
+
+├── data/
+│   ├── raw/
+│   │   ├── data.csv
+│   │   └── online_retail_II.csv
+│   │
+│   └── processed/
+│       ├── source1.parquet
+│       ├── source2.parquet
+│       ├── sales.parquet
+│       ├── returns.parquet
+│       ├── products.parquet
+│       └── rejected.parquet
+
+├── sql/
+│   ├── init_dw.sql
+│   └── validation_queries.sql
+
+├── docker-compose.yml
+├── README.md
+├── DECISIONES.md
+├── .env
+└── .env.example
 ```
 
-## 3. Configurar variables de entorno
+---
 
-```powershell
-copy .env.example .env
+# Infrastructure
+
+The platform runs using Docker Compose.
+
+Services deployed:
+
+| Service           | Purpose                                              |
+| ----------------- | ---------------------------------------------------- |
+| postgres-airflow  | Airflow metadata database                            |
+| postgres-dw       | Analytical PostgreSQL repository                     |
+| airflow-init      | Initializes Airflow users, variables and connections |
+| airflow-webserver | Airflow UI                                           |
+| airflow-scheduler | DAG orchestration                                    |
+
+---
+
+# Running the Project
+
+## 1. Configure Environment Variables
+
+Create the environment file:
+
+```bash
+cp .env.example .env
 ```
-Abre `.env` y cambia `DW_PASSWORD` por una contraseña propia (no es necesario
-para que funcione en local, pero es buena práctica).
 
-## 4. Levantar el entorno
+Populate:
 
-```powershell
+```env
+DW_USER=postgres
+DW_PASSWORD=password
+DW_DB=datamart
+```
+
+---
+
+## 2. Start Infrastructure
+
+```bash
 docker-compose up -d
 ```
 
-Esto descarga las imágenes (la primera vez tarda unos minutos), y deja
-corriendo automáticamente:
-- Airflow webserver en http://localhost:8080 (usuario: `admin`, contraseña: `admin`)
-- Airflow scheduler
-- Postgres de metadatos de Airflow (uso interno, no lo necesitas tocar)
-- Postgres del Data Warehouse en el puerto `5433`, con las tablas ya creadas
+This command initializes:
 
-Espera ~2 minutos la primera vez (el contenedor `airflow-init` necesita
-terminar de instalar dependencias y configurar todo antes de que el
-webserver quede disponible).
+* PostgreSQL (metadata)
+* PostgreSQL (Data Warehouse)
+* Airflow Scheduler
+* Airflow Webserver
+* Airflow Variables
+* Airflow Connections
 
-## 5. Verificar que todo quedó bien configurado
+---
 
-1. Entra a http://localhost:8080 con `admin` / `admin`.
-2. Ve a **Admin → Connections** y confirma que existe `dw_postgres`
-   apuntando a `postgres-dw`.
-3. Ve a **Admin → Variables** y confirma que existen `REJECT_LOG_TABLE`
-   y `DUPLICATE_PRIORITY_SOURCE`.
-4. Ve a **DAGs**, activa (toggle) el DAG `pipeline_datamart`, y dispáralo
-   manualmente con el botón ▶ (Trigger DAG) para no esperar al schedule diario.
+## 3. Access Airflow
 
-## 6. Verificar que los datos llegaron al Data Warehouse
-
-Conéctate con DBeaver/pgAdmin a:
-- Host: `localhost`
-- Puerto: `5433`
-- Usuario/Contraseña/DB: los que pusiste en `.env`
-
-O desde la terminal:
-```powershell
-docker exec -it postgres-dw psql -U datamart_user -d datamart_dw -c "SELECT COUNT(*) FROM sales;"
+```text
+http://localhost:8080
 ```
 
-## 7. Apagar el entorno
+Credentials:
 
-```powershell
-docker-compose down
-```
-Para borrar también los datos (reinicio completo desde cero):
-```powershell
-docker-compose down -v
+```text
+username: admin
+password: admin
 ```
 
-## 8. Estructura del repositorio
+Verify:
 
-```
-docker-compose.yml     -> define todos los servicios
-.env.example            -> variables de entorno necesarias (sin secretos reales)
-dags/                   -> DAG de Airflow (orquestación)
-scripts/                -> lógica de extracción, transformación y carga
-sql/init_dw.sql         -> creación de tablas del Data Warehouse
-data/raw/                -> CSV de entrada (no se sube a Git, ver .gitignore)
-DECISIONES.md            -> documento de decisiones técnicas y casos ambiguos
+Admin → Connections
+
+Expected:
+
+```text
+dw_postgres
 ```
 
-Ver `DECISIONES.md` para el detalle de cómo se modeló el repositorio
-analítico y cómo se resolvió cada caso ambiguo del enunciado.
+Verify:
+
+Admin → Variables
+
+Expected:
+
+```text
+DUPLICATE_PRIORITY_SOURCE
+REJECT_LOG_TABLE
+```
+
+---
+
+# Pipeline Flow
+
+## Extract
+
+Reads raw CSV datasets.
+
+Sources:
+
+* data.csv
+* online_retail_II.csv
+
+Output:
+
+```text
+source1.parquet
+source2.parquet
+```
+
+---
+
+## Transform
+
+Applies:
+
+* Schema standardization
+* UTC conversion
+* Customer normalization
+* Product canonicalization
+* Cross-source deduplication
+* Sales/returns separation
+* Revenue calculations
+* Data quality validation
+
+Output:
+
+```text
+sales.parquet
+returns.parquet
+products.parquet
+rejected.parquet
+```
+
+---
+
+## Load
+
+Loads curated datasets into PostgreSQL.
+
+Target tables:
+
+* products
+* sales
+* returns
+* rejected_records
+
+Loading strategy:
+
+* Delete by process_date
+* UPSERT on conflicts
+
+This guarantees idempotent execution.
+
+---
+
+# Data Quality Rules
+
+Implemented validations:
+
+* unit_price > 0
+* invoice_date must be valid
+* product_code cannot be empty
+* missing customer IDs → UNKNOWN
+* duplicate resolution between sources
+
+Rejected records are stored in:
+
+```text
+rejected_records
+```
+
+---
+
+# Analytical Validation
+
+Business validation queries are available in:
+
+```text
+sql/validation_queries.sql
+```
+
+Examples:
+
+* Monthly net revenue
+* Product performance
+* Return ratios
+* Geographic analysis
+* Customer segmentation
+* Catalog verification
+
+---
+
+# Technologies
+
+* Python
+* Pandas
+* Apache Airflow 2.9
+* PostgreSQL 16
+* Docker Compose
+* SQLAlchemy
+* Parquet
+
+---
+
+# Author
+
+Technical Assessment — DataMart S.A.S.

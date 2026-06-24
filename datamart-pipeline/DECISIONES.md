@@ -1,97 +1,235 @@
-# DataMart S.A.S. — Pipeline ETL con Apache Airflow
+# Architecture Decision Records (ADR) — DataMart S.A.S.
 
-Pipeline que extrae datos de ventas (Kaggle), los limpia/transforma aplicando
-reglas de negocio, y los carga en un Data Warehouse en PostgreSQL, todo
-orquestado por Apache Airflow corriendo en Docker.
+This document records the technical decisions and tradeoffs applied during the implementation of the ETL platform.
 
-## 1. Requisitos previos
+---
 
-- Docker Desktop instalado y corriendo (incluye Docker Compose).
-- Git.
-- (Opcional, para inspeccionar el DW) DBeaver o pgAdmin.
+# ADR 001 — Layered ETL Architecture
 
-## 2. Descargar los datos (paso manual, una sola vez)
+## Status
 
-Como las fuentes son privadas de Kaggle, descárgalas manualmente y ponlas
-en `data/raw/`:
+Approved
 
-1. https://www.kaggle.com/datasets/carrie1/ecommerce-data → descarga `data.csv`
-2. https://www.kaggle.com/datasets/thedevastator/online-retail-transaction-dataset → descarga `online_retail_II.csv`
+## Context
 
-Resultado esperado:
-```
-data/raw/data.csv
-data/raw/online_retail_II.csv
-```
+Data ingestion, business transformations, and persistence have different responsibilities and should evolve independently.
 
-## 3. Configurar variables de entorno
+## Decision
 
-```powershell
-copy .env.example .env
-```
-Abre `.env` y cambia `DW_PASSWORD` por una contraseña propia (no es necesario
-para que funcione en local, pero es buena práctica).
+The platform was separated into:
 
-## 4. Levantar el entorno
+* extract.py
+* transform.py
+* load.py
 
-```powershell
-docker-compose up -d
+Orchestrated through:
+
+```text
+pipeline_datamart.py
 ```
 
-Esto descarga las imágenes (la primera vez tarda unos minutos), y deja
-corriendo automáticamente:
-- Airflow webserver en http://localhost:8080 (usuario: `admin`, contraseña: `admin`)
-- Airflow scheduler
-- Postgres de metadatos de Airflow (uso interno, no lo necesitas tocar)
-- Postgres del Data Warehouse en el puerto `5433`, con las tablas ya creadas
+Extraction only reads files.
 
-Espera ~2 minutos la primera vez (el contenedor `airflow-init` necesita
-terminar de instalar dependencias y configurar todo antes de que el
-webserver quede disponible).
+Transformation contains business logic.
 
-## 5. Verificar que todo quedó bien configurado
+Load handles persistence.
 
-1. Entra a http://localhost:8080 con `admin` / `admin`.
-2. Ve a **Admin → Connections** y confirma que existe `dw_postgres`
-   apuntando a `postgres-dw`.
-3. Ve a **Admin → Variables** y confirma que existen `REJECT_LOG_TABLE`
-   y `DUPLICATE_PRIORITY_SOURCE`.
-4. Ve a **DAGs**, activa (toggle) el DAG `pipeline_datamart`, y dispáralo
-   manualmente con el botón ▶ (Trigger DAG) para no esperar al schedule diario.
+## Consequences
 
-## 6. Verificar que los datos llegaron al Data Warehouse
+Pros:
 
-Conéctate con DBeaver/pgAdmin a:
-- Host: `localhost`
-- Puerto: `5433`
-- Usuario/Contraseña/DB: los que pusiste en `.env`
+* Better maintainability
+* Easier testing
+* Clear ownership boundaries
 
-O desde la terminal:
-```powershell
-docker exec -it postgres-dw psql -U datamart_user -d datamart_dw -c "SELECT COUNT(*) FROM sales;"
+---
+
+# ADR 002 — Idempotent Loading Strategy
+
+## Status
+
+Approved
+
+## Context
+
+Airflow retries and DAG reruns can create duplicated records.
+
+## Decision
+
+Implemented two complementary mechanisms:
+
+1. Delete records by process_date.
+2. Execute PostgreSQL UPSERT.
+
+Implementation:
+
+```text
+DELETE + ON CONFLICT DO UPDATE
 ```
 
-## 7. Apagar el entorno
+## Consequences
 
-```powershell
-docker-compose down
-```
-Para borrar también los datos (reinicio completo desde cero):
-```powershell
-docker-compose down -v
+Pros:
+
+* Safe reruns
+* Retry resilience
+* No duplicated analytical records
+
+Tradeoff:
+
+* Additional write operations during execution.
+
+---
+
+# ADR 003 — Business Ambiguity Resolution
+
+## Status
+
+Approved
+
+### Missing Customer IDs
+
+Decision:
+
+```text
+UNKNOWN
 ```
 
-## 8. Estructura del repositorio
+Reason:
 
-```
-docker-compose.yml     -> define todos los servicios
-.env.example            -> variables de entorno necesarias (sin secretos reales)
-dags/                   -> DAG de Airflow (orquestación)
-scripts/                -> lógica de extracción, transformación y carga
-sql/init_dw.sql         -> creación de tablas del Data Warehouse
-data/raw/                -> CSV de entrada (no se sube a Git, ver .gitignore)
-DECISIONES.md            -> documento de decisiones técnicas y casos ambiguos
+Preserve anonymous purchases.
+
+---
+
+### Canonical Product Names
+
+Decision:
+
+Use the most frequent normalized description.
+
+Reason:
+
+Remove text inconsistencies.
+
+---
+
+### Duplicate Transactions
+
+Decision:
+
+Use:
+
+```text
+invoice_no
+product_code
+invoice_date_utc
 ```
 
-Ver `DECISIONES.md` para el detalle de cómo se modeló el repositorio
-analítico y cómo se resolvió cada caso ambiguo del enunciado.
+Priority source configured through:
+
+```text
+DUPLICATE_PRIORITY_SOURCE
+```
+
+Reason:
+
+Avoid hardcoded business priorities.
+
+---
+
+# ADR 004 — Data Quality and Error Isolation
+
+## Status
+
+Approved
+
+## Context
+
+Operational datasets contain incomplete or inconsistent values.
+
+## Decision
+
+Invalid records are separated from valid datasets.
+
+Rejected rows are persisted into:
+
+```text
+rejected_records
+```
+
+Additional patch:
+
+Missing return dates are replaced using Airflow execution date.
+
+## Consequences
+
+Pros:
+
+* Prevents pipeline interruption
+* Maintains auditability
+* Preserves analytical completeness
+
+Tradeoff:
+
+Patched dates should be interpreted carefully in edge-case analysis.
+
+---
+
+# ADR 005 — Analytical Warehouse Design
+
+## Status
+
+Approved
+
+## Context
+
+Business reporting required operational separation between sales and returns.
+
+## Decision
+
+Implemented analytical relational modeling.
+
+Entities:
+
+* products
+* sales
+* returns
+* rejected_records
+
+Design principles:
+
+* Separate sales and returns
+* Independent catalog
+* Soft constraints
+* Analytical indexes
+
+Indexes:
+
+```text
+idx_sales_date
+idx_sales_product
+idx_sales_country
+idx_returns_product
+idx_returns_date
+```
+
+## Consequences
+
+Pros:
+
+* Faster analytical queries
+* Easier revenue calculations
+* Flexible ingestion
+* Lower operational failures
+
+---
+
+# Final Notes
+
+This implementation prioritizes:
+
+* reproducibility
+* idempotency
+* traceability
+* operational resilience
+* analytical usability
